@@ -79,7 +79,7 @@ pub fn build_session_model_provider(
     )?;
 
     Ok((model_provider, model_provider_ref.to_string(), model_name))
-            false,
+}
 
 /// Resolve the tool dispatcher with the same provider-capability fallback
 /// used by fresh agent construction.
