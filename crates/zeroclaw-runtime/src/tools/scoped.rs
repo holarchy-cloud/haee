@@ -152,6 +152,7 @@ pub struct ScopedAssembled {
     /// `tool_search` tool was registered).
     pub activated_handle: Option<Arc<std::sync::Mutex<ActivatedToolSet>>>,
     pub mcp_tool_names: HashSet<String>,
+    pub mcp_server_tool_names: HashSet<String>,
 }
 
 impl ScopedAssembled {
@@ -307,6 +308,7 @@ impl ScopedToolRegistry {
         // MCP-origin ground truth for the tool_filter_groups gates; see
         // the `ScopedAssembled::mcp_tool_names` field doc for the contract.
         let mut mcp_tool_names: HashSet<String> = HashSet::new();
+        let mut mcp_server_tool_names: HashSet<String> = HashSet::new();
 
         let agent_mcp_servers = if connect_mcp && config.mcp.enabled {
             config.mcp_servers_for_agent(agent_alias)
@@ -362,7 +364,9 @@ impl ScopedToolRegistry {
                 // Origin set: every `<server>__<tool>` name the registry knows.
                 // Deferred stubs derive from the same `tool_names()` call, so
                 // one extension covers eager, deferred, and later activations.
-                mcp_tool_names.extend(registry.tool_names());
+                let server_tool_names = registry.tool_names();
+                mcp_server_tool_names.extend(server_tool_names.iter().cloned());
+                mcp_tool_names.extend(server_tool_names);
                 // Elevation arcs exist only to resolve skill-declared MCP
                 // elevation in step 5; skip the collection when no skills are
                 // registered through this assembly.
@@ -628,6 +632,7 @@ impl ScopedToolRegistry {
             pinned_section,
             activated_handle,
             mcp_tool_names,
+            mcp_server_tool_names,
         }
     }
 }

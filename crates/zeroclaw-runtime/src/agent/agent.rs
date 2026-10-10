@@ -79,7 +79,7 @@ pub fn build_session_model_provider(
     )?;
 
     Ok((model_provider, model_provider_ref.to_string(), model_name))
-}
+            false,
 
 /// Resolve the tool dispatcher with the same provider-capability fallback
 /// used by fresh agent construction.
@@ -1409,6 +1409,7 @@ impl Agent {
             None,
             None,
             None,
+            false,
         )
         .await
     }
@@ -1437,6 +1438,7 @@ impl Agent {
             sop_audit,
             canvas_store,
             None,
+            false,
         )
         .await
     }
@@ -1468,6 +1470,7 @@ impl Agent {
             sop_audit,
             canvas_store,
             Some(live_config),
+            false,
         )
         .await
     }
@@ -1500,6 +1503,7 @@ impl Agent {
             sop_audit,
             None,
             None,
+            false,
         )
         .await
     }
@@ -1531,6 +1535,33 @@ impl Agent {
             sop_audit,
             None,
             Some(live_config),
+            false,
+        )
+        .await
+    }
+
+    pub async fn from_config_with_session_cwd_and_paperclip_mcp_tools(
+        config: &Config,
+        agent_alias: &str,
+        session_cwd: Option<&Path>,
+        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
+        sop_audit: Option<Arc<SopAuditLogger>>,
+        canvas_store: Option<tools::CanvasStore>,
+    ) -> Result<Self> {
+        Self::from_config_with_session_cwd_and_mcp_approval_mode(
+            config,
+            agent_alias,
+            session_cwd,
+            true,
+            true,
+            true,
+            true,
+            None,
+            sop_engine,
+            sop_audit,
+            canvas_store,
+            None,
+            true,
         )
         .await
     }
@@ -1549,6 +1580,7 @@ impl Agent {
         sop_audit: Option<Arc<SopAuditLogger>>,
         canvas_store: Option<tools::CanvasStore>,
         live_config: Option<Arc<parking_lot::RwLock<Config>>>,
+        paperclip_tools_only: bool,
     ) -> Result<Self> {
         let agent_cfg = config
             .agent(agent_alias)
@@ -1741,6 +1773,7 @@ impl Agent {
             escalate_handle,
             channel_room_handle,
             activated_handle,
+            mcp_server_tool_names,
             // from_config performs no per-turn tool_filter_groups filtering
             // itself, so mcp_tool_names is dropped here along with `registry`'s
             // already-consumed sibling fields via `..`.
@@ -1830,6 +1863,9 @@ impl Agent {
         let mut agent = builder
             .model_provider(model_provider)
             .tools(tools)
+            .allowed_tools(
+                paperclip_tools_only.then(|| mcp_server_tool_names.into_iter().collect()),
+            )
             .memory(memory.clone())
             .observer(observer)
             .response_cache(response_cache)
