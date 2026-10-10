@@ -2,23 +2,23 @@
   <img src="docs/assets/zeroclaw-banner.png" alt="ZeroClaw" width="600" />
 </p>
 
-<h1 align="center">🦀 ZeroClaw — Personal AI Assistant</h1>
+<h1 align="center">Holon Agent Execution Environment (HAEE)</h1>
 
 <p align="center">
   <strong>You own the agent. You own the data. You own the machine it runs on.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zeroclaw-labs/zeroclaw/ci.yml?branch=master&label=build" alt="Build Status" /></a>
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/releases/latest"><img src="https://img.shields.io/github/v/release/zeroclaw-labs/zeroclaw?label=release" alt="Latest release" /></a>
+  <a href="https://github.com/holarchy-cloud/haee/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/holarchy-cloud/haee/ci.yml?branch=master&label=build" alt="Build Status" /></a>
+  <a href="https://github.com/holarchy-cloud/haee/releases/latest"><img src="https://img.shields.io/github/v/release/holarchy-cloud/haee?label=release" alt="Latest release" /></a>
   <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202024-orange?logo=rust" alt="Rust Edition 2024" /></a>
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors"><img src="https://img.shields.io/github/contributors/zeroclaw-labs/zeroclaw?color=green" alt="Contributors" /></a>
+  <a href="https://github.com/holarchy-cloud/haee/graphs/contributors"><img src="https://img.shields.io/github/contributors/holarchy-cloud/haee?color=green" alt="Contributors" /></a>
   <a href="https://discord.gg/zeroclaw"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 <p align="center">
-  <a href="https://docs.zeroclaw.com/master/en/introduction.html">Docs</a> ·
+  <a href="https://docs.zeroclaw.com/master/en/introduction.html">Upstream docs</a> ·
   <a href="docs/book/src/philosophy/index.md">Philosophy</a> ·
   <a href="docs/book/src/getting-started/quickstart.md">Quick start</a> ·
   <a href="docs/book/src/architecture/overview.md">Architecture</a> ·
@@ -27,13 +27,17 @@
 
 ---
 
-ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
+Holon Agent Execution Environment (HAEE, pronounced “hay”) is an agent runtime based on ZeroClaw — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace. The command-line executable remains `zeroclaw` for compatibility.
+
+> **Independent derivative:** HAEE is maintained by Holarchy Cloud and is not an official ZeroClaw Labs project. It is based on [upstream ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw); see the upstream repository for the original project and releases.
 
 Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
 
 ## Install
 
-### Unix (recommended)
+HAEE-specific release and installer artifacts are not published yet. The generated installer below installs the upstream ZeroClaw release, not an HAEE build.
+
+### Upstream ZeroClaw binary (not HAEE)
 
 <!-- >>> generated:readme-unix-fast by `cargo generate installers` - do not edit <<< -->
 ```sh
@@ -164,13 +168,13 @@ AI-assisted PRs are welcome; see [Contribution culture (RFC #5615)](https://gith
 
 Do not file public issues for security vulnerabilities. Email `security@zeroclaw.dev`. See [SECURITY.md](SECURITY.md) for the full policy.
 
-## Official repository & impersonation notice
+## Upstream project and attribution
 
-This is the only official ZeroClaw repository:
+HAEE is an independent derivative of ZeroClaw. The upstream project is maintained at:
 
 > <https://github.com/zeroclaw-labs/zeroclaw>
 
-Any other repository, organization, domain, or package claiming to be "ZeroClaw" or implying affiliation with ZeroClaw Labs is **unauthorized and not affiliated with this project**.
+This repository is not affiliated with or endorsed by ZeroClaw Labs. The ZeroClaw name and logo are trademarks of ZeroClaw Labs. Upstream notices, contributor attribution, and license terms are retained.
 
 ## License
 
@@ -178,7 +182,7 @@ Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choos
 
 ## Credits
 
-Built and maintained by the community — original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Full maintainer list in [Communication](docs/book/src/contributing/communication.md).
+HAEE is maintained by Holarchy Cloud and builds on work from the ZeroClaw community — original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Full upstream maintainer list in [Communication](docs/book/src/contributing/communication.md).
 
 Thanks to the communities that incubated early work: **Harvard University**, **MIT**, **Sundai Club**, and every contributor pushing it forward.
 
