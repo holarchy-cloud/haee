@@ -135,7 +135,7 @@ The process still speaks ZeroClaw config and CLI:
 # config default remains under the ZeroClaw-compatible path (e.g. ~/.zeroclaw)
 ```
 
-Pair it with Paperclip through the external adapter (today `paperclip-zeroclaw-adapter`, rename target `paperclip-haee-adapter`). Do not treat a plain upstream `install.sh` curl as an HAEE install—that path installs **upstream ZeroClaw**, not this fork.
+Pair it with Paperclip through the external adapter [`paperclip-haee-adapter`](https://github.com/holarchy-cloud/paperclip-haee-adapter). Do not treat a plain upstream `install.sh` curl as an HAEE install—that path installs **upstream ZeroClaw**, not this fork.
 
 ## Repository layout (high level)
 
