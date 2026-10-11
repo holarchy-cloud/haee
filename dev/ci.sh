@@ -10,6 +10,8 @@ else
   exit 1
 fi
 
+REPO_ROOT="$(cd "$(dirname "$COMPOSE_FILE")/.." && pwd)"
+mkdir -p "$REPO_ROOT/.cache/haee-target"
 compose_cmd=(docker compose -f "$COMPOSE_FILE")
 SMOKE_CACHE_DIR="${SMOKE_CACHE_DIR:-.cache/buildx-smoke}"
 

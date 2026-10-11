@@ -318,7 +318,9 @@ impl AcpServer {
         }
     }
 
-    fn paperclip_mcp_servers(params: &Value) -> RpcResult<Option<Vec<McpServerConfig>>> {
+    fn paperclip_mcp_servers(
+        params: &Value,
+    ) -> std::result::Result<Option<Vec<McpServerConfig>>, RpcError> {
         if params.get("paperclipToolsOnly").and_then(Value::as_bool) != Some(true) {
             return Ok(None);
         }
@@ -1174,7 +1176,7 @@ impl AcpServer {
             .agent(&restore_alias)
             .is_some_and(|a| a.acp_enable_mcp);
         let agent_result = self
-            .build_agent(&config, &restore_alias, &workspace_dir, enable_mcp)
+            .build_agent(&config, &restore_alias, &workspace_dir, enable_mcp, None)
             .await
             .map_err(|e| RpcError {
                 code: INTERNAL_ERROR,
@@ -2770,32 +2772,42 @@ mod tests {
 
     #[test]
     fn paperclip_mcp_servers_requires_authenticated_http_entries() {
-        assert!(AcpServer::paperclip_mcp_servers(&serde_json::json!({})).unwrap().is_none());
-        assert!(AcpServer::paperclip_mcp_servers(&serde_json::json!({
+        assert!(
+            AcpServer::paperclip_mcp_servers(&serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            AcpServer::paperclip_mcp_servers(&serde_json::json!({
                 "paperclipToolsOnly": true,
                 "mcpServers": []
             }))
             .unwrap()
-            .is_some_and(|servers| servers.is_empty()));
-        assert!(AcpServer::paperclip_mcp_servers(&serde_json::json!({
-            "paperclipToolsOnly": true,
-            "mcpServers": [{
-                "type": "stdio",
-                "name": "unexpected",
-                "command": "echo"
-            }]
-        }))
-        .is_err());
-        assert!(AcpServer::paperclip_mcp_servers(&serde_json::json!({
-            "paperclipToolsOnly": true,
-            "mcpServers": [{
-                "type": "http",
-                "name": "missing-auth",
-                "url": "https://paperclip.example/mcp",
-                "headers": []
-            }]
-        }))
-        .is_err());
+            .is_some_and(|servers| servers.is_empty())
+        );
+        assert!(
+            AcpServer::paperclip_mcp_servers(&serde_json::json!({
+                "paperclipToolsOnly": true,
+                "mcpServers": [{
+                    "type": "stdio",
+                    "name": "unexpected",
+                    "command": "echo"
+                }]
+            }))
+            .is_err()
+        );
+        assert!(
+            AcpServer::paperclip_mcp_servers(&serde_json::json!({
+                "paperclipToolsOnly": true,
+                "mcpServers": [{
+                    "type": "http",
+                    "name": "missing-auth",
+                    "url": "https://paperclip.example/mcp",
+                    "headers": []
+                }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3724,8 +3736,7 @@ mod tests {
             .expect("session should be active")
             .lock()
             .await;
-        let tool_names = session.agent.tool_names();
-        assert_eq!(tool_names, vec!["paperclip__issue.read"]);
+        assert_eq!(session.agent.tool_names(), vec!["paperclip__issue.read"]);
         drop(session);
         drop(sessions);
 
@@ -3753,14 +3764,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_new_paperclip_tools_only_empty_catalog_exposes_no_tools() {
+        let cwd = tempfile::tempdir().unwrap();
+        let configured_server = start_mock_mcp_http_server("configured_only").await;
+        let mut config = make_mcp_granting_test_config(cwd.path(), configured_server.uri());
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let acp = AcpServer::new(config, AcpServerConfig::default());
+
+        let result = acp
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+                "paperclipToolsOnly": true,
+                "mcpServers": []
+            }))
+            .await
+            .expect("empty Paperclip catalog should create a tool-less session");
+
+        let session_id = result["sessionId"]
+            .as_str()
+            .expect("session id must be returned");
+        let sessions = acp.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .expect("session should be active")
+            .lock()
+            .await;
+        assert!(
+            session.agent.tool_names().is_empty(),
+            "empty Paperclip catalog must not fall back to built-in or configured tools"
+        );
+        drop(session);
+        drop(sessions);
+
+        assert!(
+            configured_server
+                .received_requests()
+                .await
+                .expect("configured mock should retain request history")
+                .is_empty(),
+            "empty Paperclip catalog must not connect configured MCP bundles"
+        );
+    }
+
+    #[tokio::test]
     async fn session_resume_rebuilds_paperclip_tools_with_current_invocation_token() {
         let cwd = tempfile::tempdir().unwrap();
         let first_server = start_mock_mcp_http_server("first_run_tool").await;
         let resumed_server = start_mock_mcp_http_server("resumed_run_tool").await;
-        let config = make_test_config(cwd.path());
-        let store = Arc::new(
-            zeroclaw_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap(),
-        );
+        let configured_server = start_mock_mcp_http_server("configured_only").await;
+        let mut config = make_mcp_granting_test_config(cwd.path(), configured_server.uri());
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let store =
+            Arc::new(zeroclaw_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
         let acp = AcpServer::new_with_store(config, AcpServerConfig::default(), store);
         let make_params = |url: String, token: &str| {
             serde_json::json!({
@@ -3792,10 +3856,18 @@ mod tests {
             .expect("Paperclip-scoped session should resume with current server credentials");
 
         let sessions = acp.sessions.lock().await;
-        let session = sessions.get(&session_id).unwrap().lock().await;
-        assert_eq!(session.agent.tool_names(), vec!["paperclip__resumed_run_tool"]);
+        let session = sessions
+            .get(&session_id)
+            .expect("resumed session should be active")
+            .lock()
+            .await;
+        assert_eq!(
+            session.agent.tool_names(),
+            vec!["paperclip__resumed_run_tool"]
+        );
         drop(session);
         drop(sessions);
+
         let requests = resumed_server.received_requests().await.unwrap();
         assert!(requests.iter().any(|request| {
             request
@@ -3803,6 +3875,14 @@ mod tests {
                 .get("authorization")
                 .is_some_and(|value| value == "Bearer current-token")
         }));
+        assert!(
+            configured_server
+                .received_requests()
+                .await
+                .expect("configured mock should retain request history")
+                .is_empty(),
+            "resumed Paperclip-only sessions must not connect configured MCP bundles"
+        );
     }
 
     #[tokio::test]

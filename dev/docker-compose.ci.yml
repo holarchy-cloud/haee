@@ -11,13 +11,13 @@ services:
             - CARGO_TERM_COLOR=always
             - PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - CARGO_TARGET_DIR=/ci-target
+            - ZEROCLAW_REQUIRE_PAIRING=${ZEROCLAW_REQUIRE_PAIRING:-true}
         volumes:
             - ..:/workspace
             - cargo-registry:/usr/local/cargo/registry
             - cargo-git:/usr/local/cargo/git
-            - ci-target:/ci-target
+            - ../.cache/haee-target:/ci-target
 
 volumes:
     cargo-registry:
     cargo-git:
-    ci-target:

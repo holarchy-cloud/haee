@@ -10,12 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+RUN rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy --component llvm-tools-preview
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo install --locked cargo-audit --version 0.22.1 && \
-    cargo install --locked cargo-deny --version 0.18.5
+    cargo install --locked cargo-deny --version 0.18.5 && \
+    cargo install --locked cargo-llvm-cov --version 0.9.1 && \
+    cargo install --locked cargo-watch --version 8.5.3
 
 WORKDIR /workspace
 

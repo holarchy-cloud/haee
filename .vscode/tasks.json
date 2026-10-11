@@ -13,7 +13,7 @@
     {
       "label": "Build: Debug",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["build"],
       "group": {
         "kind": "build",
@@ -24,14 +24,28 @@
     {
       "label": "Build: Release",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["build", "--release"],
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Build: Export CLI (debug)",
+      "type": "shell",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["build-bin", "zeroclaw", "--locked"],
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Build: Export CLI (release)",
+      "type": "shell",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["build-bin", "zeroclaw", "--locked", "--release"],
       "problemMatcher": ["$rustc"]
     },
     {
       "label": "Build: Check (fast)",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["check", "--all-targets"],
       "problemMatcher": ["$rustc"]
     },
@@ -39,21 +53,21 @@
     {
       "label": "Lint: Clippy",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
       "problemMatcher": ["$rustc"]
     },
     {
       "label": "Lint: Format Check",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["fmt", "--all", "--", "--check"],
       "problemMatcher": []
     },
     {
       "label": "Lint: Format Fix",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["fmt", "--all"],
       "problemMatcher": []
     },
@@ -61,7 +75,8 @@
     {
       "label": "Test: All",
       "type": "shell",
-      "command": "cargo nextest --version >/dev/null 2>&1 || cargo install cargo-nextest && cargo nextest run",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["test", "--locked", "--workspace", "--exclude", "zeroclaw-desktop"],
       "group": {
         "kind": "test",
         "isDefault": true
@@ -71,19 +86,21 @@
     {
       "label": "Test: Filtered",
       "type": "shell",
-      "command": "cargo nextest --version >/dev/null 2>&1 || cargo install cargo-nextest && cargo nextest run -E 'test(${input:testFilter})'",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["test", "--workspace", "--exclude", "zeroclaw-desktop", "${input:testFilter}"],
       "problemMatcher": ["$rustc"]
     },
     {
       "label": "Test: Coverage Report",
       "type": "shell",
-      "command": "cargo llvm-cov --version >/dev/null 2>&1 || cargo install cargo-llvm-cov && cargo llvm-cov --lcov --output-path lcov.info",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["llvm-cov", "--lcov", "--output-path", "lcov.info"],
       "problemMatcher": []
     },
     {
       "label": "Test: Benchmarks",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["bench"],
       "problemMatcher": []
     },
@@ -91,13 +108,15 @@
     {
       "label": "Security: Audit",
       "type": "shell",
-      "command": "cargo audit --version >/dev/null 2>&1 || cargo install cargo-audit && cargo audit",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["audit"],
       "problemMatcher": []
     },
     {
       "label": "Security: Deny (licenses + sources)",
       "type": "shell",
-      "command": "cargo deny --version >/dev/null 2>&1 || cargo install cargo-deny && cargo deny check licenses sources",
+      "command": "./dev/cargo-in-container.sh",
+      "args": ["deny", "check", "licenses", "sources"],
       "problemMatcher": []
     },
     // ── CI (Docker) ───────────────────────────────────────
@@ -162,7 +181,7 @@
     {
       "label": "Dev: Gateway (cargo-watch)",
       "type": "shell",
-      "command": "cargo",
+      "command": "./dev/cargo-in-container.sh",
       "args": ["watch", "-x", "run -- gateway", "-i", "web/"],
       "options": {
         "env": { "ZEROCLAW_REQUIRE_PAIRING": "false" }

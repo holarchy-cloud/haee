@@ -1300,7 +1300,7 @@ impl Agent {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name()).collect()
     }

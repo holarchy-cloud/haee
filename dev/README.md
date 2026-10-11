@@ -115,6 +115,36 @@ To run an opt-in strict lint audit locally:
 ./dev/ci.sh lint-strict
 ```
 
+## Rust Commands From the Existing VS Code Workspace
+
+The Rust tasks in `.vscode/tasks.json` use the same CI image and Compose service.
+They run Cargo inside Docker and keep the editor attached to the current workspace.
+From the parent `elel-dev` workspace, invoke the wrapper by its submodule path:
+
+```bash
+./src/zeroclaw/dev/cargo-in-container.sh --version
+./src/zeroclaw/dev/cargo-in-container.sh fmt --all -- --check
+./src/zeroclaw/dev/cargo-in-container.sh test -p zeroclaw-channels session_new_paperclip_tools_only_uses_invocation_mcp
+```
+
+The wrapper accepts Cargo arguments, builds the image if needed, and runs a
+one-off container. The source checkout is bind-mounted at `/workspace`; Cargo's
+registry and Git caches remain in Compose named volumes, while incremental
+build output lives in the gitignored host directory `.cache/haee-target/`. Rust
+is not installed on the host. Rebuilding the image does not clear these caches.
+
+Export a native CLI binary on command:
+
+```bash
+./src/zeroclaw/dev/cargo-in-container.sh build-bin zeroclaw --locked
+./src/zeroclaw/dev/cargo-in-container.sh build-bin zeroclaw --locked --release
+```
+
+The wrapper copies the executable to the gitignored
+`.artifacts/haee-binaries/zeroclaw` path (debug or release profile respectively),
+ready for a local smoke test or transfer. `build-bin` currently supports native
+builds, not cross-compilation. These paths stay out of Git status.
+
 ### 3. Run targeted stages
 
 ```bash

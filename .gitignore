@@ -1,5 +1,7 @@
 /target
 /target-*/
+/.cache/haee-target/
+/.artifacts/haee-binaries/
 
 # Desktop installer build artifacts
 *.dmg
