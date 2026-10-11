@@ -1,203 +1,195 @@
-<p align="center">
-  <img src="docs/assets/zeroclaw-banner.png" alt="ZeroClaw" width="600" />
-</p>
+# HAEE
 
-<h1 align="center">Holon Agent Execution Environment (HAEE)</h1>
+**Holon Agent Execution Environment**
+
+ZeroClaw-derived agent harness for **Paperclip run-scoped** inference and tool use.
+
+HAEE is the execution environment Paperclip hires: a long-lived agent runtime that accepts a **scoped projection** of skills and tools for one invocation, runs the model loop under that policy, then drops run-scoped material on settle. It is not a second company control plane and not a drop-in replacement for every ZeroClaw deployment.
+
+The CLI binary name remains `zeroclaw` for compatibility with the ZeroClaw lineage.
 
 <p align="center">
-  <strong>You own the agent. You own the data. You own the machine it runs on.</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/holarchy-cloud/haee/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/holarchy-cloud/haee/ci.yml?branch=master&label=build" alt="Build Status" /></a>
-  <a href="https://github.com/holarchy-cloud/haee/releases/latest"><img src="https://img.shields.io/github/v/release/holarchy-cloud/haee?label=release" alt="Latest release" /></a>
+  <a href="https://github.com/holarchy-cloud/haee/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/holarchy-cloud/haee/ci.yml?branch=master&label=CI" alt="CI" /></a>
   <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202024-orange?logo=rust" alt="Rust Edition 2024" /></a>
-  <a href="https://github.com/holarchy-cloud/haee/graphs/contributors"><img src="https://img.shields.io/github/contributors/holarchy-cloud/haee?color=green" alt="Contributors" /></a>
-  <a href="https://discord.gg/zeroclaw"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord" /></a>
-</p>
-
-<p align="center">
-  <a href="https://docs.zeroclaw.com/master/en/introduction.html">Upstream docs</a> ·
-  <a href="docs/book/src/philosophy/index.md">Philosophy</a> ·
-  <a href="docs/book/src/getting-started/quickstart.md">Quick start</a> ·
-  <a href="docs/book/src/architecture/overview.md">Architecture</a> ·
-  <a href="https://discord.gg/zeroclaw">Discord</a>
+  <a href="https://github.com/paperclipai/paperclip"><img src="https://img.shields.io/badge/Paperclip-hired%20runtime-111827" alt="Paperclip hired runtime" /></a>
+  <a href="https://github.com/zeroclaw-labs/zeroclaw"><img src="https://img.shields.io/badge/derived%20from-ZeroClaw-0ea5e9" alt="Derived from ZeroClaw" /></a>
 </p>
 
 ---
 
-Holon Agent Execution Environment (HAEE, pronounced “hay”) is an agent runtime based on ZeroClaw — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace. The command-line executable remains `zeroclaw` for compatibility.
+## Why HAEE exists
 
-> **Independent derivative:** HAEE is maintained by Holarchy Cloud and is not an official ZeroClaw Labs project. It is based on [upstream ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw); see the upstream repository for the original project and releases.
+[Paperclip](https://github.com/paperclipai/paperclip) is the company control plane: agents, issues, heartbeats, skill inventory, and tool catalog. Stock [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) is a strong general agent runtime, but its ACP surface does not push **per-run** MCP tool sets the way Paperclip `runtimeMcp` / invocation-scoped tools require.
 
-Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
+HAEE keeps the ZeroClaw execution core and extends the Paperclip hire path so that:
 
-## Install
+| Concern | Owner | HAEE behavior |
+| --- | --- | --- |
+| Company library, org graph, run JWT | **Paperclip** | HAEE does **not** pull the whole company |
+| Map `execute(ctx)` → transport | **Adapter** (`paperclip-*-adapter`) | Thin client only |
+| Model loop, skill install, tool bind, settle | **HAEE** | Compile **session policy** for one run |
 
-HAEE-specific release and installer artifacts are not published yet. The generated installer below installs the upstream ZeroClaw release, not an HAEE build.
+Task text is untrusted narrative. Tool authority comes from the run-scoped catalog Paperclip (via the adapter) presents for that invocation—not from durable daemon config mutation and not from model-authored auth.
 
-### Upstream ZeroClaw binary (not HAEE)
+## What HAEE is
 
-<!-- >>> generated:readme-unix-fast by `cargo generate installers` - do not edit <<< -->
-```sh
-curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | sh
-"${CARGO_HOME:-$HOME/.cargo}/bin/zeroclaw" quickstart
+- **A Paperclip-hired execution environment** — long-lived process, ACP (and related) session host, single-agent-oriented bootstrap packing.
+- **A ZeroClaw derivative** — same crate layout, config lineage, providers, security primitives, and `zeroclaw` binary name.
+- **Run-scoped by design** — Paperclip sessions prefer an ephemeral tool/skill projection over a whole-company mount.
+
+## What HAEE is not
+
+- **Not** the Paperclip control plane, issue tracker, or skill library of record.
+- **Not** an official ZeroClaw Labs product or release channel.
+- **Not** (yet) a published HAEE installer/image that replaces every upstream ZeroClaw install path.
+- **Not** a third unrelated runtime binary beside ZeroClaw—fork with a clear hire-path purpose.
+
+## Status
+
+| Area | State |
+| --- | --- |
+| ZeroClaw-compatible runtime core | Inherited; actively maintained as a fork |
+| ACP `session/new` \| `session/resume` with `paperclipToolsOnly` + `mcpServers` | **Implemented** in `zeroclaw-channels` / agent build |
+| Empty Paperclip tool catalog ⇒ no tools exposed | **Implemented** |
+| Full **run envelope** (skills + policy object + settle contract) | **Design** — see ElEl plan docs linked below |
+| Public HAEE release artifacts / installers | **Not published yet** — build from source |
+| Multi-agent packing / K8s Operator hire path | Out of scope for current bootstrap |
+
+## Architecture (hire path)
+
+```text
+Paperclip                         Adapter                              HAEE
+────────                          ───────                              ────
+company library                   map execute(ctx) → session params    accept scoped session
+desiredSkills / runtimeMcp        open ACP (WS/stdio)                  compile session policy
+run JWT + wake context            stream logs / settle                 bind invocation MCP only
+heartbeat / run record            never own the agent loop             run model under policy
+                                                                       drop run-scoped material
 ```
-<!-- >>> end generated:readme-unix-fast <<< -->
 
-### Windows (recommended)
+**Planes (conceptual):**
 
-Use the Rust-free [prebuilt PowerShell path](docs/book/src/setup/windows.md#option-1-prebuilt-binary-recommended) in the Windows setup guide. It installs the current release, updates PATH, and runs Quickstart.
+- **L — Lifecycle** — Paperclip REST + run JWT; model follows vendored/installed Paperclip skill; no model-authored credentials.
+- **T — Tools** — Paperclip `runtimeMcp` / tool gateway projected into the session (`paperclipToolsOnly`).
+- **S — Skills** — verified pointers from the company library; install into the proper scope only (envelope design).
 
-For the guided Unix installer, source builds, app and feature selection, and PATH behavior, compare the [installation paths](docs/book/src/getting-started/quickstart.md#install).
+### Paperclip-scoped ACP (shipped seam)
 
-Run `./install.sh --help` for the complete Unix installer flag reference.
+For Paperclip-originated sessions, HAEE accepts ACP session params shaped like:
 
-> **Working on the docs?** The translated documentation catalogues live in a
-> git submodule (`docs/book/po`). The Rust build does not need it, but building
-> or syncing the docs does. Clone with it, or add it to an existing clone:
->
-> ```bash
-> git clone --recurse-submodules https://github.com/zeroclaw-labs/zeroclaw.git
-> git submodule update --init docs/book/po   # existing clone
-> ```
+```json
+{
+  "paperclipToolsOnly": true,
+  "mcpServers": [
+    {
+      "name": "paperclip-task",
+      "transport": "…",
+      "url": "…"
+    }
+  ]
+}
+```
 
-Platform-specific notes: [Linux](docs/book/src/setup/linux.md) · [macOS](docs/book/src/setup/macos.md) · [Windows](docs/book/src/setup/windows.md) · [FreeBSD](docs/book/src/setup/freebsd.md) · [NixOS](docs/book/src/setup/nixos.md) · [Docker](docs/book/src/setup/container.md)
+When `paperclipToolsOnly` is true:
 
-## Quick start
+- the session tool surface is driven by the **invocation MCP catalog**, not the daemon’s ambient tool soup;
+- an **empty** `mcpServers` list exposes **no** tools;
+- missing `mcpServers` is rejected for Paperclip-scoped sessions.
+
+This is the hard difference from stock ZeroClaw ACP for the hire path.
+
+## Build from source
+
+HAEE is a Rust workspace (edition 2024). Prefer the containerized helper so the host does not need a full Rust toolchain.
+
+### From a parent workspace that vendors this repo (e.g. ElEl)
 
 ```bash
-zeroclaw quickstart               # one-shot setup: pick a provider, write a working config
-zeroclaw agent -a <alias>         # interactive chat using the [agents.<alias>] entry
-zeroclaw service install          # register as systemd/launchctl/Windows Service
-zeroclaw service start            # run it always-on in the background
+./src/haee/dev/cargo-in-container.sh --version
+./src/haee/dev/cargo-in-container.sh test -p zeroclaw-channels \
+  session_new_paperclip_tools_only_uses_invocation_mcp
+./src/haee/dev/cargo-in-container.sh build-bin zeroclaw --locked
 ```
 
-Full walkthrough: [Quick start](docs/book/src/getting-started/quickstart.md) — or skip the safety gates with [YOLO mode](docs/book/src/getting-started/yolo.md) for dev boxes.
+Exported binary (gitignored): `.artifacts/haee-binaries/zeroclaw`  
+Incremental target dir (gitignored): `.cache/haee-target/`
 
-## What ZeroClaw does
-
-- **Multi-channel** — one agent answering you across [every channel you configure](docs/book/src/channels/overview.md). Inbound messages from Discord, Telegram, Matrix, email, webhooks, CLI — all delivered to the same agent loop.
-- **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable. Configure Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint. [Fallback chains and routing](docs/book/src/providers/routing.md) keep the agent running when a provider flakes.
-- **Security-first, with escape hatches** — default autonomy is `supervised`: medium-risk ops require approval, high-risk blocked. Workspace boundaries, command policy, OS-level sandboxes (Landlock / Bubblewrap / Seatbelt / Docker), and cryptographic [tool receipts](docs/book/src/security/tool-receipts.md) on every action. [YOLO mode](docs/book/src/getting-started/yolo.md) exists for trusted dev environments.
-- **Hardware-capable** — GPIO / I2C / SPI / USB on Raspberry Pi, STM32, Arduino, and ESP32 via the `Peripheral` trait. See [Hardware](docs/book/src/hardware/index.md).
-- **Gateway + dashboard** — HTTP / WebSocket gateway for clients, with a web dashboard for chat, memory browsing, config editing, cron management, and tool inspection.
-- **SOP engine** — event-triggered [Standard Operating Procedures](docs/book/src/sop/index.md) (MQTT / webhook / cron / peripheral) with approval gates and resumable runs.
-- **ACP** — IDE / editor integration via [Agent Client Protocol](docs/book/src/channels/acp.md) (JSON-RPC 2.0 over stdio).
-
-## Configuration
-
-One TOML file at `~/.zeroclaw/config.toml`. Pointers:
-
-- [Provider configuration](docs/book/src/providers/configuration.md) — the universal `[providers.models.<type>.<alias>]` schema
-- [Channels overview](docs/book/src/channels/overview.md) — per-channel `[channels.<type>.<alias>]` blocks
-- [Security overview](docs/book/src/security/overview.md) — autonomy, sandboxing, tool receipts
-- [Full config reference](https://docs.zeroclaw.com/master/en/reference/config.html) — generated from the live schema; every key documented
-
-A V3 config has at minimum four section headers (`<type>.<alias>` shaped) — a provider entry, an agent that references it, and a risk profile the agent gates against. See [Provider Configuration → Minimal working example](docs/book/src/providers/configuration.md#minimal-working-example) for the canonical four-section form with inline type/alias commentary.
-
-For standard OpenAI Codex subscription auth, Quickstart can write the provider
-entry for you:
+### Inside this repository
 
 ```bash
-zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json  # if already signed in with Codex CLI
-zeroclaw quickstart --model-provider openai-codex --model gpt-5.4
+./dev/ci.sh test
+./dev/ci.sh build
+# or the same Compose-backed wrapper once paths resolve from repo root:
+./dev/cargo-in-container.sh build-bin zeroclaw --locked
 ```
 
-The provider entry uses the canonical OpenAI shape; the alias below is an
-example:
+More detail: [dev/README.md](dev/README.md).
 
-```toml
-[providers.models.openai.coding]   # type = openai; alias = coding (you choose)
-model = "gpt-5.4"
-wire_api = "responses"
-requires_openai_auth = true
+### Runtime note
+
+The process still speaks ZeroClaw config and CLI:
+
+```bash
+./.artifacts/haee-binaries/zeroclaw --help
+# config default remains under the ZeroClaw-compatible path (e.g. ~/.zeroclaw)
 ```
 
-…and point your agent at it with `model_provider = "openai.<alias>"`.
+Pair it with Paperclip through the external adapter (today `paperclip-zeroclaw-adapter`, rename target `paperclip-haee-adapter`). Do not treat a plain upstream `install.sh` curl as an HAEE install—that path installs **upstream ZeroClaw**, not this fork.
 
-Notes:
+## Repository layout (high level)
 
-- Normal OpenAI Codex subscription auth uses stored auth profiles, not an `api_key` on the provider entry.
-- Claude Max setup-token auth stays on the canonical Anthropic slot: run `claude setup-token`, choose `setup_token` in Quickstart, and paste the generated token into the API key/token prompt.
-- Only set `api_key` / `uri` on `[providers.models.openai.<alias>]` when intentionally targeting a custom OpenAI-compatible gateway or endpoint.
-- If you see `provider streaming failed, falling back to non-streaming chat`, ZeroClaw retries the same request in non-streaming mode. Check `zeroclaw auth status` before changing provider config.
+| Path | Role |
+| --- | --- |
+| `crates/zeroclaw-channels` | ACP server, channels; Paperclip session overlay |
+| `crates/zeroclaw-runtime` | Agent loop, session cwd / MCP binding |
+| `crates/zeroclaw-config` | Schema and policy surfaces |
+| `crates/zeroclaw-tools` / `zeroclaw-providers` | Tools and model providers |
+| `dev/` | CI image, Compose, `cargo-in-container.sh` |
+| `docs/book/` | Inherited ZeroClaw documentation book |
 
-## Architecture
+Crate and binary names keep the `zeroclaw_*` / `zeroclaw` identifiers on purpose.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│            channels       gateway        ACP                 │
-│          (30+ adapters)   (REST/WS)    (JSON-RPC)            │
-│                        ↓                                     │
-│                   ZeroClaw runtime                           │
-│         ┌──────────┬──────────┬──────────┐                   │
-│         │  agent   │ security │   SOP    │                   │
-│         │   loop   │  policy  │  engine  │                   │
-│         └──────────┴──────────┴──────────┘                   │
-│              ↓          ↓           ↓                        │
-│          providers    tools      memory                      │
-│         (Anthropic,  (shell,    (SQLite,                     │
-│          OpenAI,     browser,    embeddings)                 │
-│          Ollama,     HTTP,                                   │
-│          ~20 more)   hardware)                               │
-└──────────────────────────────────────────────────────────────┘
-```
+## Related documents
 
-Full detail with Mermaid diagrams: [Architecture overview](docs/book/src/architecture/overview.md) · [Request lifecycle](docs/book/src/architecture/request-lifecycle.md) · [Crates](docs/book/src/architecture/crates.md).
+Canonical product vocabulary and decisions live in the ElEl control repo when HAEE is vendored there:
+
+- [ADR-0010 — Use HAEE for Paperclip-hired agents](https://github.com/sematula/elel-dev/blob/main/docs/adr/0010-use-haee-for-paperclip-hired-agents.md)
+- [HAEE run envelope (design)](https://github.com/sematula/elel-dev/blob/main/docs/plans/haee-run-envelope.md)
+- [ZeroClaw ACP contract (baseline)](https://github.com/sematula/elel-dev/blob/main/docs/plans/zeroclaw-acp-contract.md)
+
+Upstream ZeroClaw book (behavior shared with the lineage): [docs.zeroclaw.com](https://docs.zeroclaw.com/) · local sources under `docs/book/src/`.
 
 ## Contributing
 
-Start with [how to contribute](docs/book/src/contributing/how-to.md). Larger changes go through the [RFC process](docs/book/src/contributing/rfcs.md). Real-time chat lives on [Discord](https://discord.gg/zeroclaw) (the best way to reach the team); durable work tracking is on [GitHub issues](https://github.com/zeroclaw-labs/zeroclaw/issues).
+1. Prefer small, named seams for Paperclip/HAEE behavior (`paperclipToolsOnly`, session policy, envelope fields)—avoid silent divergence from upstream without a clear hire-path reason.
+2. Run the containerized test/build path above before opening a PR.
+3. Inherited contributor guide material lives under `docs/book/src/contributing/` and [CONTRIBUTING.md](CONTRIBUTING.md); treat upstream-specific branch/Discord instructions as lineage docs, not HAEE product support channels.
 
-Good places to start:
-
-- New channel → `crates/zeroclaw-channels/`
-- New provider → `crates/zeroclaw-providers/`
-- New tool → `crates/zeroclaw-tools/`
-- Hardware support → `crates/zeroclaw-hardware/`
-- Docs → `docs/book/src/`
-
-AI-assisted PRs are welcome; see [Contribution culture (RFC #5615)](https://github.com/zeroclaw-labs/zeroclaw/issues/5615) for the co-authorship norms.
-
-<!-- BEGIN:RECENT_CONTRIBUTORS -->
-<!-- END:RECENT_CONTRIBUTORS -->
+Issues and PRs for **this** fork: [holarchy-cloud/haee](https://github.com/holarchy-cloud/haee).
 
 ## Security
 
-Do not file public issues for security vulnerabilities. Email `security@zeroclaw.dev`. See [SECURITY.md](SECURITY.md) for the full policy.
+Do not file public issues for security vulnerabilities.
+
+Use GitHub private vulnerability reporting on **this** repository:
+
+https://github.com/holarchy-cloud/haee/security/advisories/new
+
+See [SECURITY.md](SECURITY.md) for process expectations. Upstream ZeroClaw security contacts do not cover HAEE-specific changes.
 
 ## Upstream project and attribution
 
-HAEE is an independent derivative of ZeroClaw. The upstream project is maintained at:
+HAEE is an **independent derivative** of ZeroClaw, maintained by Holarchy Cloud.
 
-> <https://github.com/zeroclaw-labs/zeroclaw>
+> Upstream: https://github.com/zeroclaw-labs/zeroclaw
 
-This repository is not affiliated with or endorsed by ZeroClaw Labs. The ZeroClaw name and logo are trademarks of ZeroClaw Labs. Upstream notices, contributor attribution, and license terms are retained.
+This repository is **not** affiliated with or endorsed by ZeroClaw Labs. The ZeroClaw name and logo are trademarks of ZeroClaw Labs. Upstream notices, contributor attribution, and license terms are retained in-tree.
 
 ## License
 
-Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choose either. Contributors automatically grant rights under both — see [CLA](docs/book/src/contributing/cla.md). The **ZeroClaw** name and logo are trademarks of ZeroClaw Labs.
+Dual-licensed: [MIT](LICENSE-MIT) **OR** [Apache 2.0](LICENSE-APACHE). You may choose either.
 
 ## Credits
 
-HAEE is maintained by Holarchy Cloud and builds on work from the ZeroClaw community — original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Full upstream maintainer list in [Communication](docs/book/src/contributing/communication.md).
-
-Thanks to the communities that incubated early work: **Harvard University**, **MIT**, **Sundai Club**, and every contributor pushing it forward.
-
-<p align="center">
-  <a href="https://www.star-history.com/#zeroclaw-labs/zeroclaw&type=date&legend=top-left">
-    <picture>
-     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&theme=dark&legend=top-left" />
-     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&legend=top-left" />
-     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&legend=top-left" />
-    </picture>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=zeroclaw-labs/zeroclaw" alt="ZeroClaw contributors" />
-  </a>
-</p>
+HAEE is maintained by Holarchy Cloud and builds on the ZeroClaw community—including original creator [@theonlyhennygod](https://github.com/theonlyhennygod) and project lead [@JordanTheJet](https://github.com/JordanTheJet), plus the broader upstream contributor set.
