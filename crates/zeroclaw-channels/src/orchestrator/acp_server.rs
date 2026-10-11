@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,17 @@ use zeroclaw_runtime::tools::CanvasStore;
 
 use super::acp_embedded;
 use crate::acp_channel::AcpChannel;
+
+/// Paperclip invocation material from a nested run envelope.
+///
+/// Presence (even with empty MCP / skills) marks the session as
+/// Paperclip-scoped for settle + session skill-root GC.
+struct PaperclipInvocation {
+    mcp_servers: Vec<McpServerConfig>,
+    skills: Vec<zeroclaw_api::haee_run_envelope::SkillRef>,
+    /// Non-model run auth env (PAPERCLIP_*), never placed in ACP prompts.
+    run_auth_env: BTreeMap<String, String>,
+}
 
 // ── Configuration ────────────────────────────────────────────────
 
@@ -61,6 +72,61 @@ struct Session {
     model: String,
     /// Session cwd / workspace jail root (absolute), used for embedded blob materialization.
     workspace_dir: String,
+    /// True when this session was opened with a nested Paperclip run envelope
+    /// (invocation MCP / tools-only path). Drives settle on `session/close`.
+    paperclip_invocation: bool,
+    /// Session-scoped skill install root (layout reserved for Iteration 7).
+    /// GC'd on settle even when empty / never populated.
+    session_skill_root: Option<PathBuf>,
+    /// Run-auth env applied for this Paperclip session (cleared on settle).
+    run_auth_env: Option<BTreeMap<String, String>>,
+}
+
+impl Session {
+    /// HAEE-side settle for design §7.1 step 11: drop invocation tools/skills,
+    /// clear non-model run auth env, and GC the session skill directory.
+    /// Adapter owns task-MCP stop + close.
+    fn settle_paperclip_run(&mut self) -> zeroclaw_api::haee_session_settle::SessionSettleReport {
+        use zeroclaw_api::haee_run_auth::clear_run_auth_env;
+        use zeroclaw_api::haee_session_settle::{SessionSettleReport, gc_session_skill_root};
+
+        let mut report = SessionSettleReport {
+            paperclip_invocation: self.paperclip_invocation,
+            skill_root: self.session_skill_root.clone(),
+            skill_root_removed: false,
+            agent_tools_cleared: false,
+            auth_env_cleared: false,
+        };
+        if !self.paperclip_invocation {
+            return report;
+        }
+        self.agent.settle_paperclip_invocation();
+        report.agent_tools_cleared = true;
+        if let Some(env_map) = self.run_auth_env.take() {
+            clear_run_auth_env(Some(&env_map));
+            report.auth_env_cleared = true;
+        }
+        if let Some(root) = self.session_skill_root.take() {
+            match gc_session_skill_root(&root) {
+                Ok(removed) => report.skill_root_removed = removed,
+                Err(err) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Channel)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "skill_root": root.display().to_string(),
+                                "error": err.to_string(),
+                            })),
+                        "ACP session settle: skill root GC failed"
+                    );
+                }
+            }
+            report.skill_root = Some(root);
+        }
+        report
+    }
 }
 
 // ── ACP Server ───────────────────────────────────────────────────
@@ -318,82 +384,293 @@ impl AcpServer {
         }
     }
 
-    fn paperclip_mcp_servers(
+    /// Paperclip-scoped material from nested run `envelope` only.
+    ///
+    /// - No `envelope` → non-Paperclip ACP session (`Ok(None)`), unless discarded
+    ///   top-level `paperclipToolsOnly: true` is present (fail closed).
+    /// - Nested `envelope` → validate via `haee_run_envelope`, map
+    ///   `tools.mcpServers` into invocation MCP configs and retain `skills[]`
+    ///   for plane-S install (Iteration 7).
+    /// - Empty MCP catalog is valid and still Paperclip-scoped.
+    /// - Non-empty HTTP entries must carry an Authorization header at bind time.
+    fn paperclip_invocation(
         params: &Value,
-    ) -> std::result::Result<Option<Vec<McpServerConfig>>, RpcError> {
-        if params.get("paperclipToolsOnly").and_then(Value::as_bool) != Some(true) {
-            return Ok(None);
-        }
-        let entries = params
-            .get("mcpServers")
-            .and_then(Value::as_array)
-            .ok_or_else(|| RpcError {
-                code: INVALID_PARAMS,
-                message: "Paperclip-scoped sessions require mcpServers".to_string(),
-                data: None,
-            })?;
-        let servers = entries
-            .iter()
-            .map(|entry| {
-                let invalid = || RpcError {
+    ) -> std::result::Result<Option<PaperclipInvocation>, RpcError> {
+        let Some(envelope_value) = params.get("envelope") else {
+            if params.get("paperclipToolsOnly").and_then(Value::as_bool) == Some(true) {
+                return Err(RpcError {
                     code: INVALID_PARAMS,
-                    message: "Invalid Paperclip MCP server definition".to_string(),
+                    message: "Paperclip-scoped sessions require nested `envelope` \
+                              (top-level paperclipToolsOnly is no longer accepted)"
+                        .to_string(),
                     data: None,
-                };
-                if entry.get("type").and_then(Value::as_str) != Some("http") {
-                    return Err(invalid());
-                }
-                let name = entry
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(invalid)?
-                    .to_string();
-                let url = entry
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(invalid)?
-                    .to_string();
-                let headers = entry
-                    .get("headers")
-                    .and_then(Value::as_array)
-                    .ok_or_else(invalid)?
-                    .iter()
-                    .map(|header| {
-                        let name = header
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| value.eq_ignore_ascii_case("authorization"))
-                            .ok_or_else(invalid)?;
-                        let value = header
-                            .get("value")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .ok_or_else(invalid)?;
-                        Ok((name.to_string(), value.to_string()))
-                    })
-                    .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+                });
+            }
+            return Ok(None);
+        };
+
+        let envelope = zeroclaw_api::haee_run_envelope::parse_envelope_value(envelope_value.clone())
+            .map_err(|err| RpcError {
+                code: INVALID_PARAMS,
+                message: format!("Invalid run envelope ({}): {}", err.class, err.message),
+                data: Some(serde_json::json!({
+                    "class": err.class,
+                    "message": err.message,
+                })),
+            })?;
+
+        let run_auth_env = zeroclaw_api::haee_run_auth::build_run_auth_env(
+            &envelope.identity,
+            &envelope.auth,
+            Some(&envelope.task),
+        );
+        let servers = envelope
+            .tools
+            .mcp_servers
+            .into_iter()
+            .map(|server| {
+                let headers: HashMap<String, String> = server.headers.into_iter().collect();
                 if !headers
                     .keys()
                     .any(|name| name.eq_ignore_ascii_case("authorization"))
                 {
-                    return Err(invalid());
+                    return Err(RpcError {
+                        code: INVALID_PARAMS,
+                        message: format!(
+                            "Paperclip MCP server `{}` requires an Authorization header",
+                            server.name
+                        ),
+                        data: None,
+                    });
                 }
                 Ok(McpServerConfig {
-                    name,
+                    name: server.name,
                     transport: McpTransport::Http,
-                    url: Some(url),
+                    url: Some(server.url),
                     headers,
                     ..Default::default()
                 })
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Some(servers))
+        Ok(Some(PaperclipInvocation {
+            mcp_servers: servers,
+            skills: envelope.skills,
+            run_auth_env,
+        }))
+    }
+
+    /// Ensure vendored Paperclip L0 is present on a Paperclip-scoped agent.
+    ///
+    /// Fail closed when the vendored tree is missing (design §5.4 / Iter 9).
+    fn ensure_vendored_paperclip_l0(agent: &mut Agent) -> std::result::Result<(), RpcError> {
+        let Some(l0) = zeroclaw_runtime::skills::load_vendored_paperclip_l0() else {
+            return Err(RpcError {
+                code: INTERNAL_ERROR,
+                message: "Paperclip L0 skill `paperclip` is required but not vendored \
+                          (missing vendored/skills/paperclip/SKILL.md)"
+                    .to_string(),
+                data: Some(serde_json::json!({
+                    "class": "missing_vendored_l0",
+                    "runtimeName": zeroclaw_api::haee_run_auth::PAPERCLIP_L0_RUNTIME_NAME,
+                })),
+            });
+        };
+        agent.extend_skills(vec![l0]);
+        Ok(())
+    }
+
+    /// MCP-only view for unit tests that assert server binding without skills/auth.
+    #[cfg(test)]
+    fn paperclip_mcp_servers(
+        params: &Value,
+    ) -> std::result::Result<Option<Vec<McpServerConfig>>, RpcError> {
+        Ok(Self::paperclip_invocation(params)?.map(|inv| inv.mcp_servers))
+    }
+
+    /// Fetch + install envelope skills under the session skill root, then load
+    /// them onto the agent. Failures omit the skill (log + continue); never
+    /// panics and never installs into the issue git cwd.
+    async fn install_paperclip_session_skills(
+        agent: &mut Agent,
+        skills: &[zeroclaw_api::haee_run_envelope::SkillRef],
+        session_skill_root: &Path,
+        session_id: &str,
+    ) {
+        use zeroclaw_api::haee_skill_install::{
+            SkillInstallError, error_class, install_skill_packages, is_fetchable_skill_uri,
+        };
+
+        if skills.is_empty() {
+            return;
+        }
+
+        // Fetch outside the pure install module so unit tests stay hermetic.
+        // Agent-scoped refs are omitted in v1 (no durable agent skill root yet).
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Channel)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "class": error_class::IO,
+                            "error": err.to_string(),
+                        })),
+                    "ACP skill install skipped: failed to build HTTP client"
+                );
+                return;
+            }
+        };
+
+        // reqwest is async; collect bytes first, then run pure install.
+        let mut fetched: HashMap<String, Result<Vec<u8>, SkillInstallError>> = HashMap::new();
+        for skill in skills {
+            if fetched.contains_key(&skill.key) {
+                continue;
+            }
+            if !is_fetchable_skill_uri(&skill.uri) {
+                // Empty bytes still go through install so scheme errors stay
+                // classified by the pure module (file:// / paperclip-skill://).
+                fetched.insert(skill.key.clone(), Ok(Vec::new()));
+                continue;
+            }
+            let size_cap = skill
+                .integrity
+                .as_ref()
+                .map(|i| i.size_max)
+                .unwrap_or(16 * 1024 * 1024);
+            let result = match client.get(&skill.uri).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        Err(SkillInstallError {
+                            class: error_class::IO,
+                            message: format!(
+                                "skill fetch HTTP {} for {}",
+                                resp.status(),
+                                skill.uri
+                            ),
+                        })
+                    } else {
+                        match resp.bytes().await {
+                            Ok(bytes) => {
+                                if bytes.len() as u64 > size_cap {
+                                    Err(SkillInstallError {
+                                        class: error_class::INTEGRITY_SIZE,
+                                        message: format!(
+                                            "fetched package size {} exceeds sizeMax {size_cap}",
+                                            bytes.len()
+                                        ),
+                                    })
+                                } else {
+                                    Ok(bytes.to_vec())
+                                }
+                            }
+                            Err(err) => Err(SkillInstallError {
+                                class: error_class::IO,
+                                message: format!("skill fetch body failed: {err}"),
+                            }),
+                        }
+                    }
+                }
+                Err(err) => Err(SkillInstallError {
+                    class: error_class::IO,
+                    message: format!("skill fetch failed: {err}"),
+                }),
+            };
+            fetched.insert(skill.key.clone(), result);
+        }
+
+        let (ok, failed) = install_skill_packages(
+            skills,
+            session_skill_root,
+            None, // agent scope unsupported until durable agent skill root exists
+            |skill| match fetched.get(&skill.key) {
+                Some(Ok(bytes)) => Ok(bytes.clone()),
+                Some(Err(err)) => Err(err.clone()),
+                None => Err(SkillInstallError {
+                    class: error_class::IO,
+                    message: "skill package was not fetched".into(),
+                }),
+            },
+        );
+
+        for (key, err) in &failed {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_category(::zeroclaw_log::EventCategory::Channel)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "session_id": session_id,
+                        "skill_key": key,
+                        "class": err.class,
+                        "error": err.message,
+                    })),
+                "ACP skill install omitted skill"
+            );
+        }
+
+        if ok.is_empty() {
+            return;
+        }
+
+        // allow_scripts=true only means audit permits script *files* on disk.
+        // Install never executed them; skill tools still do not run install hooks.
+        let (mut loaded, dropped) =
+            zeroclaw_runtime::skills::load_skills_from_directory(session_skill_root, true);
+        for drop in &dropped {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_category(::zeroclaw_log::EventCategory::Channel)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "session_id": session_id,
+                        "skill": drop.name,
+                        "reason": format!("{:?}", drop.reason),
+                    })),
+                "ACP session skill load dropped package"
+            );
+        }
+
+        // Honor envelope `always` when the installed runtime dir matches.
+        for skill in &mut loaded {
+            let dir_name = skill
+                .location
+                .as_ref()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
+            if let Some(name) = dir_name
+                && let Some(report) = ok.iter().find(|r| r.runtime_name == name)
+                && report.always
+            {
+                skill.always = true;
+            }
+        }
+
+        let installed_names: Vec<String> = loaded.iter().map(|s| s.name.clone()).collect();
+        agent.extend_skills(loaded);
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_category(::zeroclaw_log::EventCategory::Channel)
+                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "installed": installed_names,
+                    "omitted": failed.len(),
+                    "skill_root": session_skill_root.display().to_string(),
+                })),
+            "ACP session skills installed"
+        );
     }
 
     /// Set the connection-scoped default agent alias (`?agent=` query param
@@ -798,7 +1075,17 @@ impl AcpServer {
 
     async fn handle_session_new(&self, params: &Value) -> RpcResult {
         let config = self.config_snapshot();
-        let paperclip_mcp_servers = Self::paperclip_mcp_servers(params)?;
+        let paperclip_invocation_material = Self::paperclip_invocation(params)?;
+        let paperclip_mcp_servers = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.mcp_servers.clone());
+        let paperclip_skills = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.skills.clone())
+            .unwrap_or_default();
+        let paperclip_run_auth = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.run_auth_env.clone());
 
         // Every ACP session is bound to an explicit agent alias.
         // Accept `agentAlias` (camelCase) or `agent_alias` / `agent`,
@@ -917,7 +1204,9 @@ impl AcpServer {
         // MCP init is opt-in per agent (`[agents.<alias>].acp_enable_mcp`): off
         // by default to keep `session/new` prompt; on to load this agent's
         // `mcp_bundles` tools. Runs without the sessions lock held (see above).
-        let enable_mcp = paperclip_mcp_servers.is_some()
+        // Capture Paperclip-invocation before moving servers into build_agent.
+        let paperclip_invocation = paperclip_mcp_servers.is_some();
+        let enable_mcp = paperclip_invocation
             || config.agent(&agent_alias).is_some_and(|a| a.acp_enable_mcp);
         let mut agent = match self
             .build_agent(
@@ -989,6 +1278,21 @@ impl AcpServer {
         agent.set_channel_name("acp".to_string());
         agent.channel_handles().register_channel("acp", acp_channel);
 
+        // Paperclip-scoped: inject non-model run auth + ensure vendored L0
+        // before the session is published. Fail closed if L0 is missing.
+        if paperclip_invocation {
+            if let Some(ref env_map) = paperclip_run_auth {
+                zeroclaw_api::haee_run_auth::apply_run_auth_env(env_map);
+            }
+            if let Err(err) = Self::ensure_vendored_paperclip_l0(&mut agent) {
+                if let Some(ref env_map) = paperclip_run_auth {
+                    zeroclaw_api::haee_run_auth::clear_run_auth_env(Some(env_map));
+                }
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(err);
+            }
+        }
+
         // Persist before publishing the session, so a failed write never
         // leaves a live-but-unpersisted session; release the reservation on
         // failure. The slot stays accounted for (still in `loading`) until the
@@ -1006,6 +1310,9 @@ impl AcpServer {
                 Err(join) => Some(join.to_string()),
             };
             if let Some(detail) = error {
+                if let Some(ref env_map) = paperclip_run_auth {
+                    zeroclaw_api::haee_run_auth::clear_run_auth_env(Some(env_map));
+                }
                 self.loading_sessions.lock().await.remove(&session_id);
                 return Err(RpcError {
                     code: INTERNAL_ERROR,
@@ -1015,6 +1322,38 @@ impl AcpServer {
             }
         }
 
+        let session_skill_root = paperclip_invocation.then(|| {
+            zeroclaw_api::haee_session_settle::session_skill_root(
+                Path::new(&workspace_dir),
+                &session_id,
+            )
+        });
+        if let Some(root) = session_skill_root.as_ref() {
+            // Create the root before install so extract has a parent; settle GC
+            // still removes it even when no skills were listed.
+            if let Err(err) = std::fs::create_dir_all(root) {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Channel)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "skill_root": root.display().to_string(),
+                            "error": err.to_string(),
+                        })),
+                    "ACP session skill root create failed"
+                );
+            } else if !paperclip_skills.is_empty() {
+                Self::install_paperclip_session_skills(
+                    &mut agent,
+                    &paperclip_skills,
+                    root,
+                    &session_id,
+                )
+                .await;
+            }
+        }
         let now = Instant::now();
         // Atomically insert and release the reservation.
         {
@@ -1036,6 +1375,9 @@ impl AcpServer {
                         .and_then(|mp| mp.model.clone())
                         .unwrap_or_default(),
                     workspace_dir: workspace_dir.clone(),
+                    paperclip_invocation,
+                    session_skill_root,
+                    run_auth_env: paperclip_run_auth,
                 })),
             );
         }
@@ -1240,6 +1582,10 @@ impl AcpServer {
                         .and_then(|mp| mp.model.clone())
                         .unwrap_or_default(),
                     workspace_dir: workspace_dir.to_string_lossy().into_owned(),
+                    // session/load has no envelope; not a Paperclip invocation.
+                    paperclip_invocation: false,
+                    session_skill_root: None,
+                    run_auth_env: None,
                 })),
             );
         }
@@ -1287,7 +1633,17 @@ impl AcpServer {
     }
 
     async fn handle_session_resume(&self, params: &Value) -> RpcResult {
-        let paperclip_mcp_servers = Self::paperclip_mcp_servers(params)?;
+        let paperclip_invocation_material = Self::paperclip_invocation(params)?;
+        let paperclip_mcp_servers = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.mcp_servers.clone());
+        let paperclip_skills = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.skills.clone())
+            .unwrap_or_default();
+        let paperclip_run_auth = paperclip_invocation_material
+            .as_ref()
+            .map(|inv| inv.run_auth_env.clone());
         let session_id = params
             .get("sessionId")
             .or_else(|| params.get("session_id"))
@@ -1387,7 +1743,8 @@ impl AcpServer {
 
         // MCP init follows the restored agent's own opt-in
         // (`[agents.<alias>].acp_enable_mcp`), matching `session/new`.
-        let enable_mcp = paperclip_mcp_servers.is_some()
+        let paperclip_invocation = paperclip_mcp_servers.is_some();
+        let enable_mcp = paperclip_invocation
             || config
                 .agent(&restore_alias)
                 .is_some_and(|a| a.acp_enable_mcp);
@@ -1426,6 +1783,46 @@ impl AcpServer {
         agent.set_channel_name("acp".to_string());
         agent.channel_handles().register_channel("acp", acp_channel);
 
+        if paperclip_invocation {
+            if let Some(ref env_map) = paperclip_run_auth {
+                zeroclaw_api::haee_run_auth::apply_run_auth_env(env_map);
+            }
+            if let Err(err) = Self::ensure_vendored_paperclip_l0(&mut agent) {
+                if let Some(ref env_map) = paperclip_run_auth {
+                    zeroclaw_api::haee_run_auth::clear_run_auth_env(Some(env_map));
+                }
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(err);
+            }
+        }
+
+        let session_skill_root = paperclip_invocation.then(|| {
+            zeroclaw_api::haee_session_settle::session_skill_root(&workspace_dir, &session_id)
+        });
+        if let Some(root) = session_skill_root.as_ref() {
+            if let Err(err) = std::fs::create_dir_all(root) {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Channel)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "skill_root": root.display().to_string(),
+                            "error": err.to_string(),
+                        })),
+                    "ACP session skill root create failed on resume"
+                );
+            } else if !paperclip_skills.is_empty() {
+                Self::install_paperclip_session_skills(
+                    &mut agent,
+                    &paperclip_skills,
+                    root,
+                    &session_id,
+                )
+                .await;
+            }
+        }
         let now = Instant::now();
         // Atomically insert and release reservation
         {
@@ -1447,6 +1844,9 @@ impl AcpServer {
                         .and_then(|mp| mp.model.clone())
                         .unwrap_or_default(),
                     workspace_dir: workspace_dir.to_string_lossy().into_owned(),
+                    paperclip_invocation,
+                    session_skill_root,
+                    run_auth_env: paperclip_run_auth,
                 })),
             );
         }
@@ -1533,10 +1933,14 @@ impl AcpServer {
         };
 
         // Wait for any in-flight turn to finish (the cancel token may have already stopped it).
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
         let agent_alias = session.agent_alias.clone();
         let model_provider = session.model_provider.clone();
         let model = session.model.clone();
+        // Design §7.1 step 11: drop invocation MCP tools/skills and GC session
+        // skill root before the session is dropped. Durable config is never
+        // written with run bearer (session used a clone overlay only).
+        let settle = session.settle_paperclip_run();
         session.agent.channel_handles().unregister_channel("acp");
         ::zeroclaw_log::record!(
             INFO,
@@ -1548,6 +1952,10 @@ impl AcpServer {
                     "agent_alias": agent_alias,
                     "model_provider": model_provider,
                     "model": model,
+                    "paperclip_invocation": settle.paperclip_invocation,
+                    "agent_tools_cleared": settle.agent_tools_cleared,
+                    "skill_root_removed": settle.skill_root_removed,
+                    "auth_env_cleared": settle.auth_env_cleared,
                 })),
             "ACP session closed"
         );
@@ -2770,8 +3178,63 @@ mod tests {
     use async_trait::async_trait;
     use zeroclaw_api::model_provider::ModelProvider;
 
+    /// Minimal valid nested run envelope for ACP Paperclip-scoped tests.
+    fn paperclip_test_envelope(mcp_servers: serde_json::Value) -> serde_json::Value {
+        paperclip_test_envelope_with_skills(mcp_servers, serde_json::json!([]))
+    }
+
+    fn paperclip_test_envelope_with_skills(
+        mcp_servers: serde_json::Value,
+        skills: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "envelopeVersion": 1,
+            "identity": {
+                "runId": "run_test",
+                "agentId": "agent_test",
+                "companyId": "company_test",
+                "haeeAgentAlias": "test-agent"
+            },
+            "task": { "summary": "test envelope" },
+            "auth": {
+                "paperclipApiBaseUrl": "http://paperclip.test",
+                "runBearerToken": "run-token",
+                "runIdHeader": "X-Paperclip-Run-Id"
+            },
+            "skills": skills,
+            "tools": {
+                "paperclipToolsOnly": true,
+                "mcpServers": mcp_servers
+            },
+            "policy": {},
+            "session": {}
+        })
+    }
+
+    fn make_skill_tar_bytes(body: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        let data = body.as_bytes();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "SKILL.md", data)
+            .expect("append SKILL.md");
+        // Sibling script must be extracted but never executed on install.
+        let mut script_header = tar::Header::new_gnu();
+        let script = b"#!/bin/sh\ntouch ./RAN_ON_INSTALL\n";
+        script_header.set_size(script.len() as u64);
+        script_header.set_mode(0o755);
+        script_header.set_cksum();
+        builder
+            .append_data(&mut script_header, "install.sh", &script[..])
+            .expect("append install.sh");
+        builder.into_inner().expect("finish tar")
+    }
+
     #[test]
-    fn paperclip_mcp_servers_requires_authenticated_http_entries() {
+    fn paperclip_mcp_servers_requires_nested_envelope_with_authenticated_http_entries() {
         assert!(
             AcpServer::paperclip_mcp_servers(&serde_json::json!({}))
                 .unwrap()
@@ -2782,31 +3245,78 @@ mod tests {
                 "paperclipToolsOnly": true,
                 "mcpServers": []
             }))
+            .is_err(),
+            "top-level paperclipToolsOnly without nested envelope must fail closed"
+        );
+        assert!(
+            AcpServer::paperclip_mcp_servers(&serde_json::json!({
+                "envelope": paperclip_test_envelope(serde_json::json!([]))
+            }))
             .unwrap()
             .is_some_and(|servers| servers.is_empty())
         );
         assert!(
             AcpServer::paperclip_mcp_servers(&serde_json::json!({
-                "paperclipToolsOnly": true,
-                "mcpServers": [{
+                "envelope": paperclip_test_envelope(serde_json::json!([{
                     "type": "stdio",
                     "name": "unexpected",
-                    "command": "echo"
-                }]
+                    "url": "http://invalid.example",
+                    "headers": { "Authorization": "Bearer x" }
+                }]))
             }))
             .is_err()
         );
         assert!(
             AcpServer::paperclip_mcp_servers(&serde_json::json!({
-                "paperclipToolsOnly": true,
-                "mcpServers": [{
+                "envelope": paperclip_test_envelope(serde_json::json!([{
                     "type": "http",
                     "name": "missing-auth",
                     "url": "https://paperclip.example/mcp",
-                    "headers": []
-                }]
+                    "headers": {}
+                }]))
             }))
             .is_err()
+        );
+        let servers = AcpServer::paperclip_mcp_servers(&serde_json::json!({
+            "envelope": paperclip_test_envelope(serde_json::json!([{
+                "type": "http",
+                "name": "paperclip",
+                "url": "https://paperclip.example/mcp",
+                "headers": { "Authorization": "Bearer run-token" }
+            }]))
+        }))
+        .expect("valid envelope tools must parse")
+        .expect("Paperclip envelope must enable tools-only path");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "paperclip");
+        assert_eq!(
+            servers[0].headers.get("Authorization").map(String::as_str),
+            Some("Bearer run-token")
+        );
+    }
+
+    #[test]
+    fn paperclip_mcp_servers_rejects_invalid_envelope_before_bind() {
+        let err = AcpServer::paperclip_mcp_servers(&serde_json::json!({
+            "envelope": {
+                "envelopeVersion": 1,
+                "identity": {
+                    "runId": "run_test",
+                    "agentId": "agent_test",
+                    "companyId": "company_test",
+                    "haeeAgentAlias": "test-agent"
+                },
+                "task": { "summary": "missing auth" },
+                "skills": [],
+                "tools": { "paperclipToolsOnly": true, "mcpServers": [] }
+            }
+        }))
+        .expect_err("incomplete envelope must fail closed");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            err.message.contains("Invalid run envelope"),
+            "error should name envelope validation: {}",
+            err.message
         );
     }
 
@@ -3716,13 +4226,12 @@ mod tests {
             .handle_session_new(&serde_json::json!({
                 "cwd": cwd.path().to_string_lossy(),
                 "agentAlias": "test-agent",
-                "paperclipToolsOnly": true,
-                "mcpServers": [{
+                "envelope": paperclip_test_envelope(serde_json::json!([{
                     "type": "http",
                     "name": "paperclip",
                     "url": paperclip_server.uri(),
-                    "headers": [{ "name": "Authorization", "value": "Bearer run-token" }]
-                }]
+                    "headers": { "Authorization": "Bearer run-token" }
+                }]))
             }))
             .await
             .expect("Paperclip-scoped session should connect its invocation MCP server");
@@ -3779,8 +4288,7 @@ mod tests {
             .handle_session_new(&serde_json::json!({
                 "cwd": cwd.path().to_string_lossy(),
                 "agentAlias": "test-agent",
-                "paperclipToolsOnly": true,
-                "mcpServers": []
+                "envelope": paperclip_test_envelope(serde_json::json!([]))
             }))
             .await
             .expect("empty Paperclip catalog should create a tool-less session");
@@ -3828,13 +4336,12 @@ mod tests {
         let acp = AcpServer::new_with_store(config, AcpServerConfig::default(), store);
         let make_params = |url: String, token: &str| {
             serde_json::json!({
-                "paperclipToolsOnly": true,
-                "mcpServers": [{
+                "envelope": paperclip_test_envelope(serde_json::json!([{
                     "type": "http",
                     "name": "paperclip",
                     "url": url,
-                    "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }]
-                }]
+                    "headers": { "Authorization": format!("Bearer {token}") }
+                }]))
             })
         };
         let mut new_params = make_params(first_server.uri(), "first-token");
@@ -3882,6 +4389,467 @@ mod tests {
                 .expect("configured mock should retain request history")
                 .is_empty(),
             "resumed Paperclip-only sessions must not connect configured MCP bundles"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_close_settles_paperclip_invocation_without_durable_bearer() {
+        use zeroclaw_api::haee_session_settle::{
+            durable_config_text_has_invocation_bearer, session_skill_root,
+        };
+
+        let cwd = tempfile::tempdir().unwrap();
+        let durable_config_path = cwd.path().join("config.toml");
+        std::fs::write(
+            &durable_config_path,
+            "# lab durable config seed — must stay free of run bearer\n",
+        )
+        .unwrap();
+        let paperclip_server = start_mock_mcp_http_server("issue.read").await;
+        let mut config = make_mcp_granting_test_config(cwd.path(), paperclip_server.uri());
+        config.config_path = durable_config_path.clone();
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let acp = AcpServer::new(config, AcpServerConfig::default());
+
+        let result = acp
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+                "envelope": paperclip_test_envelope(serde_json::json!([{
+                    "type": "http",
+                    "name": "paperclip",
+                    "url": paperclip_server.uri(),
+                    "headers": { "Authorization": "Bearer run-token" }
+                }]))
+            }))
+            .await
+            .expect("Paperclip-scoped session should open");
+
+        let session_id = result["sessionId"]
+            .as_str()
+            .expect("session id must be returned")
+            .to_string();
+
+        // session/new may fall back to the per-agent workspace when the
+        // requested cwd is the install root placeholder — derive skill root
+        // from the live session workspace, not the tempdir seed path alone.
+        let skill_root = {
+            let sessions = acp.sessions.lock().await;
+            let session = sessions
+                .get(&session_id)
+                .expect("session should be active")
+                .lock()
+                .await;
+            assert!(
+                session.paperclip_invocation,
+                "envelope session must mark paperclip_invocation"
+            );
+            assert_eq!(session.agent.tool_names(), vec!["paperclip__issue.read"]);
+            assert!(
+                session.run_auth_env.is_some(),
+                "Paperclip session must retain run_auth_env for settle clear"
+            );
+            assert_eq!(
+                std::env::var(zeroclaw_api::haee_run_auth::ENV_API_KEY).ok().as_deref(),
+                Some("run-token"),
+                "run auth must be applied to process env for non-model channels"
+            );
+            let root = session_skill_root(Path::new(&session.workspace_dir), &session_id);
+            assert_eq!(
+                session.session_skill_root.as_ref(),
+                Some(&root),
+                "session skill root layout must match settle helper"
+            );
+            root
+        };
+        std::fs::create_dir_all(&skill_root).unwrap();
+        std::fs::write(skill_root.join("placeholder.skill"), "session-scoped").unwrap();
+
+        acp.handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/close must settle and succeed");
+
+        assert!(
+            acp.sessions.lock().await.get(&session_id).is_none(),
+            "settled session must be removed from the live map"
+        );
+        assert!(
+            !skill_root.exists(),
+            "session skill root must be GC'd on settle"
+        );
+        assert!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_API_KEY).is_err(),
+            "settle must clear PAPERCLIP_API_KEY from process env"
+        );
+        assert!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_RUN_ID).is_err(),
+            "settle must clear PAPERCLIP_RUN_ID from process env"
+        );
+
+        // Durable server config is a clone source only — never receives the
+        // invocation MCP overlay / run bearer written into session_config.
+        let snapshot = acp.config_snapshot();
+        assert!(
+            snapshot.mcp.servers.iter().all(|server| {
+                !server
+                    .headers
+                    .get("Authorization")
+                    .or_else(|| server.headers.get("authorization"))
+                    .is_some_and(|value| {
+                        value
+                            .to_ascii_lowercase()
+                            .trim()
+                            .starts_with("bearer ")
+                    })
+            }),
+            "durable config snapshot must not carry invocation Authorization bearer"
+        );
+        assert!(
+            !snapshot.mcp_bundles.contains_key("__paperclip_invocation"),
+            "durable config must not retain the invocation MCP bundle name"
+        );
+        let durable_text = std::fs::read_to_string(&durable_config_path).unwrap();
+        assert!(
+            !durable_config_text_has_invocation_bearer(&durable_text),
+            "on-disk config.toml must stay free of run bearer / invocation bundle"
+        );
+    }
+
+    #[test]
+    fn paperclip_invocation_retains_envelope_skills_and_rejects_top_level_tools_only() {
+        let inv = AcpServer::paperclip_invocation(&serde_json::json!({
+            "envelope": paperclip_test_envelope_with_skills(
+                serde_json::json!([]),
+                serde_json::json!([{
+                    "key": "co/demo",
+                    "runtimeName": "demo-skill",
+                    "uri": "https://skills.example/demo.tar",
+                    "integrity": {
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "sizeMax": 4096
+                    },
+                    "mediaType": "application/x-tar",
+                    "scope": "session",
+                    "always": true
+                }])
+            )
+        }))
+        .expect("valid envelope must parse")
+        .expect("nested envelope marks Paperclip invocation");
+        assert!(inv.mcp_servers.is_empty());
+        assert_eq!(inv.skills.len(), 1);
+        assert_eq!(inv.skills[0].runtime_name, "demo-skill");
+        assert_eq!(inv.skills[0].uri, "https://skills.example/demo.tar");
+        assert_eq!(
+            inv.run_auth_env
+                .get(zeroclaw_api::haee_run_auth::ENV_API_KEY)
+                .map(String::as_str),
+            Some("run-token")
+        );
+        assert_eq!(
+            inv.run_auth_env
+                .get(zeroclaw_api::haee_run_auth::ENV_RUN_ID)
+                .map(String::as_str),
+            Some("run_test")
+        );
+        assert!(
+            AcpServer::paperclip_invocation(&serde_json::json!({
+                "paperclipToolsOnly": true
+            }))
+            .is_err(),
+            "top-level paperclipToolsOnly without nested envelope must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_loads_vendored_l0_without_envelope_skill_fetch() {
+        // 9.1 — L0 present with empty skills[]; no skill HTTP fetch required.
+        let paperclip_server = start_mock_mcp_http_server("issue.read").await;
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = make_mcp_granting_test_config(cwd.path(), paperclip_server.uri());
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let acp = AcpServer::new(config, AcpServerConfig::default());
+
+        assert!(
+            zeroclaw_runtime::skills::vendored_paperclip_l0_available(),
+            "test host must ship vendored/skills/paperclip"
+        );
+
+        let result = acp
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+                "envelope": paperclip_test_envelope(serde_json::json!([{
+                    "type": "http",
+                    "name": "paperclip",
+                    "url": paperclip_server.uri(),
+                    "headers": { "Authorization": "Bearer run-token" }
+                }]))
+            }))
+            .await
+            .expect("Paperclip session with empty skills[] must open with vendored L0");
+
+        let session_id = result["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        {
+            let sessions = acp.sessions.lock().await;
+            let session = sessions.get(&session_id).unwrap().lock().await;
+            assert!(
+                session
+                    .agent
+                    .skill_names()
+                    .iter()
+                    .any(|n| *n == zeroclaw_api::haee_run_auth::PAPERCLIP_L0_RUNTIME_NAME),
+                "vendored L0 runtime name must be present; got {:?}",
+                session.agent.skill_names()
+            );
+            let prompt = session
+                .agent
+                .system_prompt_for_test()
+                .expect("system prompt");
+            assert!(
+                prompt.to_ascii_lowercase().contains("heartbeat")
+                    || prompt.contains("PAPERCLIP_API_URL")
+                    || prompt.contains("Paperclip"),
+                "L0 always skill must appear in system prompt"
+            );
+            // 9.3 — run JWT value must not appear in the model-facing prompt.
+            // Header *names* and env var *names* may appear in L0 prose; only
+            // the bearer secret is forbidden.
+            let auth = session.run_auth_env.as_ref().expect("run auth map");
+            let bearer = auth
+                .get(zeroclaw_api::haee_run_auth::ENV_API_KEY)
+                .expect("API key in run auth");
+            assert!(
+                !bearer.is_empty() && !prompt.contains(bearer),
+                "system prompt must not embed run bearer"
+            );
+            assert!(
+                !prompt.contains("run-token"),
+                "literal test bearer must not appear in prompt"
+            );
+        }
+
+        acp.handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("close");
+    }
+
+    #[tokio::test]
+    async fn session_new_applies_run_auth_env_and_settle_clears() {
+        // 9.2 — auth env set for non-model use; settle clears.
+        let paperclip_server = start_mock_mcp_http_server("issue.read").await;
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = make_mcp_granting_test_config(cwd.path(), paperclip_server.uri());
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let acp = AcpServer::new(config, AcpServerConfig::default());
+
+        // Isolate ambient process env from prior tests.
+        zeroclaw_api::haee_run_auth::clear_run_auth_env(None);
+
+        let result = acp
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+                "envelope": paperclip_test_envelope(serde_json::json!([{
+                    "type": "http",
+                    "name": "paperclip",
+                    "url": paperclip_server.uri(),
+                    "headers": { "Authorization": "Bearer run-token" }
+                }]))
+            }))
+            .await
+            .expect("session/new");
+
+        let session_id = result["sessionId"].as_str().unwrap().to_string();
+
+        assert_eq!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_API_URL).unwrap(),
+            "http://paperclip.test"
+        );
+        assert_eq!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_API_KEY).unwrap(),
+            "run-token"
+        );
+        assert_eq!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_RUN_ID).unwrap(),
+            "run_test"
+        );
+        assert_eq!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_AGENT_ID).unwrap(),
+            "agent_test"
+        );
+        assert_eq!(
+            std::env::var(zeroclaw_api::haee_run_auth::ENV_COMPANY_ID).unwrap(),
+            "company_test"
+        );
+
+        acp.handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/close");
+
+        for key in zeroclaw_api::haee_run_auth::RUN_AUTH_ENV_KEYS {
+            assert!(
+                std::env::var(key).is_err(),
+                "{key} must be cleared on settle"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_new_installs_http_skill_and_settles_skill_root() {
+        use sha2::{Digest, Sha256};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zeroclaw_api::haee_session_settle::session_skill_root;
+
+        let pack_bytes = make_skill_tar_bytes(
+            "---\nname: issue-triage\ndescription: triage helper\n---\n# Issue triage\n",
+        );
+        let sha = {
+            let mut hasher = Sha256::new();
+            hasher.update(&pack_bytes);
+            format!("{:x}", hasher.finalize())
+        };
+
+        let skill_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/skills/issue-triage.tar"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/x-tar")
+                    .set_body_bytes(pack_bytes.clone()),
+            )
+            .mount(&skill_server)
+            .await;
+
+        let paperclip_server = start_mock_mcp_http_server("issue.read").await;
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = make_mcp_granting_test_config(cwd.path(), paperclip_server.uri());
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test-agent must exist")
+            .acp_enable_mcp = true;
+        let acp = AcpServer::new(config, AcpServerConfig::default());
+
+        let skill_uri = format!("{}/skills/issue-triage.tar", skill_server.uri());
+        let result = acp
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+                "envelope": paperclip_test_envelope_with_skills(
+                    serde_json::json!([{
+                        "type": "http",
+                        "name": "paperclip",
+                        "url": paperclip_server.uri(),
+                        "headers": { "Authorization": "Bearer run-token" }
+                    }]),
+                    serde_json::json!([{
+                        "key": "co/issue-triage",
+                        "runtimeName": "issue-triage",
+                        "uri": skill_uri,
+                        "integrity": {
+                            "sha256": sha,
+                            "sizeMax": pack_bytes.len() as u64 + 1024
+                        },
+                        "mediaType": "application/x-tar",
+                        "scope": "session",
+                        "always": true
+                    }, {
+                        "key": "co/local-file",
+                        "runtimeName": "local-file",
+                        "uri": "file:///tmp/should-not-install.tar",
+                        "integrity": {
+                            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "sizeMax": 1024
+                        },
+                        "mediaType": "application/x-tar",
+                        "scope": "session"
+                    }])
+                )
+            }))
+            .await
+            .expect("Paperclip session with skills should open");
+
+        let session_id = result["sessionId"]
+            .as_str()
+            .expect("session id must be returned")
+            .to_string();
+
+        let skill_root = {
+            let sessions = acp.sessions.lock().await;
+            let session = sessions
+                .get(&session_id)
+                .expect("session should be active")
+                .lock()
+                .await;
+            assert!(session.paperclip_invocation);
+            assert!(
+                session
+                    .agent
+                    .skill_names()
+                    .iter()
+                    .any(|name| *name == "issue-triage"),
+                "good HTTP skill must load onto the agent; got {:?}",
+                session.agent.skill_names()
+            );
+            assert!(
+                !session
+                    .agent
+                    .skill_names()
+                    .iter()
+                    .any(|name| *name == "local-file"),
+                "file:// skill must be omitted"
+            );
+            let root = session
+                .session_skill_root
+                .clone()
+                .expect("envelope session must reserve skill root");
+            assert_eq!(
+                root,
+                session_skill_root(Path::new(&session.workspace_dir), &session_id)
+            );
+            assert!(
+                root.join("issue-triage/SKILL.md").is_file(),
+                "good pack must install under session skill root"
+            );
+            assert!(
+                root.join("issue-triage/install.sh").is_file(),
+                "package scripts may exist on disk"
+            );
+            assert!(
+                !root.join("issue-triage/RAN_ON_INSTALL").exists(),
+                "install must not execute package scripts"
+            );
+            assert!(
+                !root.join("local-file").exists(),
+                "rejected file:// skill must leave no install dir"
+            );
+            root
+        };
+
+        acp.handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/close must settle");
+        assert!(
+            !skill_root.exists(),
+            "session skill root must be GC'd on settle"
         );
     }
 

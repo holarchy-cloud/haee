@@ -207,6 +207,11 @@ impl ActivatedToolSet {
         self.tools.insert(name, tool);
     }
 
+    /// Drop all activated deferred tools (session settle / Paperclip close).
+    pub fn clear(&mut self) {
+        self.tools.clear();
+    }
+
     pub fn is_activated(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }

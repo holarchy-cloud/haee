@@ -225,6 +225,14 @@ impl Tool for SkillShellTool {
             cmd.env(SESSION_ID_ENV_VAR, session_id);
         }
 
+        // Paperclip run auth for L0 skill scripts / curl (design §7.2).
+        // Present only while a Paperclip session has applied haee_run_auth.
+        for key in zeroclaw_api::haee_run_auth::RUN_AUTH_ENV_KEYS {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+
         let result =
             tokio::time::timeout(Duration::from_secs(self.timeout_secs), cmd.output()).await;
 

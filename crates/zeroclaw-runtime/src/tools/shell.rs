@@ -343,6 +343,16 @@ impl Tool for ShellTool {
             cmd.env(SESSION_ID_ENV_VAR, session_id);
         }
 
+        // Paperclip run auth (non-model): forward only when the process env
+        // carries keys applied by haee_run_auth for the active Paperclip
+        // session. Not on SAFE_SHELL_ENV_VARS — secrets stay out of the
+        // baseline allowlist and disappear when settle clears process env.
+        for key in zeroclaw_api::haee_run_auth::RUN_AUTH_ENV_KEYS {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+
         // Overlay TUI env on top of the safe-env snapshot. TUI vars win on
         // conflict — the user's real PATH etc. should take precedence over
         // whatever the daemon process inherited.

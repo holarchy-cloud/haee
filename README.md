@@ -50,9 +50,9 @@ Task text is untrusted narrative. Tool authority comes from the run-scoped catal
 | Area | State |
 | --- | --- |
 | ZeroClaw-compatible runtime core | Inherited; actively maintained as a fork |
-| ACP `session/new` \| `session/resume` with `paperclipToolsOnly` + `mcpServers` | **Implemented** in `zeroclaw-channels` / agent build |
+| Nested run **envelope** on ACP `session/new` \| `session/resume` (tools, skills, policy, auth, identity) | **Implemented (v1)** — parse/validate, policy compile, skill install, settle, vendored L0, non-model run auth |
 | Empty Paperclip tool catalog ⇒ no tools exposed | **Implemented** |
-| Full **run envelope** (skills + policy object + settle contract) | **Design** — see ElEl plan docs linked below |
+| Lab isolation hire + binary pin (deployed HAEE ≠ local tip) | **Open** — Iteration 10 / ElEl GitHub #6 |
 | Public HAEE release artifacts / installers | **Not published yet** — build from source |
 | Multi-agent packing / K8s Operator hire path | Out of scope for current bootstrap |
 
@@ -72,22 +72,27 @@ heartbeat / run record            never own the agent loop             run model
 
 - **L — Lifecycle** — Paperclip REST + run JWT; model follows vendored/installed Paperclip skill; no model-authored credentials.
 - **T — Tools** — Paperclip `runtimeMcp` / tool gateway projected into the session (`paperclipToolsOnly`).
-- **S — Skills** — verified pointers from the company library; install into the proper scope only (envelope design).
+- **S — Skills** — verified pointers from the company library; install into session scope from envelope `skills[]`; vendored L0 `paperclip` is always available without envelope fetch.
 
 ### Paperclip-scoped ACP (shipped seam)
 
-For Paperclip-originated sessions, HAEE accepts ACP session params shaped like:
+For Paperclip-originated sessions, HAEE accepts a nested `envelope` on ACP `session/new` | `session/resume` (sole tools/auth authority). Conceptual shape:
 
 ```json
 {
-  "paperclipToolsOnly": true,
-  "mcpServers": [
-    {
-      "name": "paperclip-task",
-      "transport": "…",
-      "url": "…"
+  "envelope": {
+    "envelopeVersion": 1,
+    "tools": {
+      "paperclipToolsOnly": true,
+      "mcpServers": [
+        {
+          "name": "paperclip-task",
+          "transport": "…",
+          "url": "…"
+        }
+      ]
     }
-  ]
+  }
 }
 ```
 
@@ -107,8 +112,7 @@ HAEE is a Rust workspace (edition 2024). Prefer the containerized helper so the 
 
 ```bash
 ./src/haee/dev/cargo-in-container.sh --version
-./src/haee/dev/cargo-in-container.sh test -p zeroclaw-channels \
-  session_new_paperclip_tools_only_uses_invocation_mcp
+./src/haee/dev/cargo-in-container.sh test -p zeroclaw-channels --lib -- paperclip
 ./src/haee/dev/cargo-in-container.sh build-bin zeroclaw --locked
 ```
 

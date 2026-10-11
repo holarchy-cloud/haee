@@ -559,6 +559,51 @@ fn dir_stem(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Directory containing the vendored Paperclip L0 skill (`paperclip/SKILL.md`).
+///
+/// Resolution order:
+/// 1. `HAEE_VENDORED_SKILLS_DIR` / `paperclip` (deploy override)
+/// 2. Compile-time crate path `vendored/skills/paperclip` (dev + container builds)
+/// 3. `ZEROCLAW_INSTALL_ROOT` / `vendored/skills/paperclip` when set
+pub fn vendored_paperclip_l0_dir() -> Option<PathBuf> {
+    use zeroclaw_api::haee_run_auth::PAPERCLIP_L0_RUNTIME_NAME;
+
+    let candidates = [
+        std::env::var_os("HAEE_VENDORED_SKILLS_DIR").map(|p| PathBuf::from(p).join(PAPERCLIP_L0_RUNTIME_NAME)),
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendored/skills").join(PAPERCLIP_L0_RUNTIME_NAME)),
+        std::env::var_os("ZEROCLAW_INSTALL_ROOT").map(|p| {
+            PathBuf::from(p)
+                .join("vendored")
+                .join("skills")
+                .join(PAPERCLIP_L0_RUNTIME_NAME)
+        }),
+    ];
+    candidates.into_iter().flatten().find(|dir| dir.join("SKILL.md").is_file())
+}
+
+/// Load the vendored Paperclip L0 skill, forcing `always = true` so heartbeat
+/// procedure stays in the system prompt without an envelope skill fetch.
+///
+/// Loads `SKILL.md` directly (not via workspace audit) so companion scripts
+/// under `scripts/` do not block L0 availability. Returns `None` when the
+/// vendored tree is missing (caller fails closed for Paperclip sessions).
+pub fn load_vendored_paperclip_l0() -> Option<Skill> {
+    let dir = vendored_paperclip_l0_dir()?;
+    let skill_md = dir.join("SKILL.md");
+    let mut skill = load_skill_md(&skill_md, &dir).ok()?;
+    // Canonical runtime name for first-write-wins against envelope packs.
+    skill.name = zeroclaw_api::haee_run_auth::PAPERCLIP_L0_RUNTIME_NAME.to_string();
+    // L0 is operational policy for Paperclip employees — always inline.
+    skill.always = true;
+    skill.location = Some(skill_md);
+    Some(skill)
+}
+
+/// True when the vendored L0 tree is present and loadable.
+pub fn vendored_paperclip_l0_available() -> bool {
+    load_vendored_paperclip_l0().is_some()
+}
+
 /// Load all skills from the workspace skills directory
 pub fn load_skills(workspace_dir: &Path) -> Vec<Skill> {
     load_skills_with_open_skills_config(workspace_dir, None, None, None).0

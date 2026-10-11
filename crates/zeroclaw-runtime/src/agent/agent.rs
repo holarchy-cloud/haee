@@ -1305,7 +1305,51 @@ impl Agent {
         self.tools.iter().map(|t| t.name()).collect()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn skill_names(&self) -> Vec<&str> {
+        self.skills.iter().map(|skill| skill.name.as_str()).collect()
+    }
+
+    /// Append session-installed skills (Paperclip envelope plane S).
+    ///
+    /// First-write wins on `name` so workspace/vendored skills are not
+    /// overwritten by a colliding runtimeName. Call after envelope skill
+    /// install under the session skill root. Refreshes the system prompt so
+    /// `always` skills (including vendored L0) become visible to the model.
+    pub fn extend_skills(&mut self, extra: Vec<crate::skills::Skill>) {
+        let mut added = false;
+        for skill in extra {
+            if self.skills.iter().any(|existing| existing.name == skill.name) {
+                continue;
+            }
+            self.skills.push(skill);
+            added = true;
+        }
+        if added {
+            self.refresh_system_prompt();
+        }
+    }
+
+    /// Drop run-scoped tool/skill/MCP surface after Paperclip `session/close`.
+    ///
+    /// Invocation MCP tools and session skills must not outlive the ACP session
+    /// (design §6.3 / §7.1 step 11). Durable `config.toml` is never written here;
+    /// the session used a cloned config overlay only.
+    pub fn settle_paperclip_invocation(&mut self) {
+        // retain is a sealed-registry mutator that only removes tools.
+        self.tools.retain(|_| false);
+        self.skills.clear();
+        if let Some(activated) = self.activated_tools.as_ref() {
+            if let Ok(mut guard) = activated.lock() {
+                guard.clear();
+            }
+        }
+        self.activated_tools = None;
+        self.mcp_pinned_section.clear();
+        self.mcp_deferred_section.clear();
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
     pub fn system_prompt_for_test(&self) -> Result<String> {
         self.build_system_prompt()
     }
@@ -1860,12 +1904,32 @@ impl Agent {
         let builder = Agent::builder();
         #[cfg(test)]
         let builder = builder.delegate_tool(built_delegate_tool);
+        // Paperclip-scoped sessions: compile an explicit SessionPolicy and apply
+        // its allow-list (envelope MCP only by default; builtins deny-default).
+        // See zeroclaw_api::haee_session_policy and design §6.2.
+        let paperclip_allowed_tools = if paperclip_tools_only {
+            let envelope_mcp_server_names: Vec<String> = config
+                .mcp
+                .servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect();
+            let risk_profile_name = agent_cfg.risk_profile.trim().to_string();
+            let session_policy = zeroclaw_api::haee_session_policy::compile_paperclip_session_policy(
+                risk_profile_name,
+                &risk_profile.allowed_tools,
+                &risk_profile.excluded_tools,
+                &envelope_mcp_server_names,
+                mcp_server_tool_names,
+            );
+            Some(session_policy.allowed_tool_names)
+        } else {
+            None
+        };
         let mut agent = builder
             .model_provider(model_provider)
             .tools(tools)
-            .allowed_tools(
-                paperclip_tools_only.then(|| mcp_server_tool_names.into_iter().collect()),
-            )
+            .allowed_tools(paperclip_allowed_tools)
             .memory(memory.clone())
             .observer(observer)
             .response_cache(response_cache)
