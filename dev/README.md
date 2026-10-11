@@ -122,9 +122,9 @@ They run Cargo inside Docker and keep the editor attached to the current workspa
 From the parent `elel-dev` workspace, invoke the wrapper by its submodule path:
 
 ```bash
-./src/zeroclaw/dev/cargo-in-container.sh --version
-./src/zeroclaw/dev/cargo-in-container.sh fmt --all -- --check
-./src/zeroclaw/dev/cargo-in-container.sh test -p zeroclaw-channels session_new_paperclip_tools_only_uses_invocation_mcp
+./src/haee/dev/cargo-in-container.sh --version
+./src/haee/dev/cargo-in-container.sh fmt --all -- --check
+./src/haee/dev/cargo-in-container.sh test -p zeroclaw-channels session_new_paperclip_tools_only_uses_invocation_mcp
 ```
 
 The wrapper accepts Cargo arguments, builds the image if needed, and runs a
@@ -136,8 +136,8 @@ is not installed on the host. Rebuilding the image does not clear these caches.
 Export a native CLI binary on command:
 
 ```bash
-./src/zeroclaw/dev/cargo-in-container.sh build-bin zeroclaw --locked
-./src/zeroclaw/dev/cargo-in-container.sh build-bin zeroclaw --locked --release
+./src/haee/dev/cargo-in-container.sh build-bin zeroclaw --locked
+./src/haee/dev/cargo-in-container.sh build-bin zeroclaw --locked --release
 ```
 
 The wrapper copies the executable to the gitignored
